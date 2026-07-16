@@ -1,0 +1,48 @@
+{
+  "name": "HR Policy Agent — golden eval",
+  "description": "Grounded policy Q&A, gotcha cases, and refusals. Reuses questions from elevate-hr-agent's rag_eval_golden set, with expected facts from the Altostrat Singapore handbook. Runs against RETRIEVAL_MODE=okf and =rag.",
+  "cases": [
+    {
+      "id": "sick_leave_and_mc",
+      "query": "How many days of paid outpatient sick leave do I get per year, and what is the deadline to submit a Medical Certificate if I'm out sick for 3 days?",
+      "expected_substrings": ["14", "48"],
+      "expect_refusal": false
+    },
+    {
+      "id": "vacation_accrual_and_shift",
+      "query": "I have been working at Altostrat for 8 years and I work 12-hour shifts. How many vacation days do I earn per year, and how many vacation days do I log to take a single 12-hour shift off?",
+      "expected_substrings": ["21", "1.5"],
+      "expect_refusal": false
+    },
+    {
+      "id": "ramp_back_time",
+      "query": "What are the working hour and pay requirements during the 2-week Ramp-Back time?",
+      "expected_substrings": ["50%", "100%"],
+      "expect_refusal": false
+    },
+    {
+      "id": "host_gift_card_gotcha",
+      "query": "I'm staying at my cousin's house on a work trip instead of a hotel. As a thank-you I want to buy him a $45 gift card and expense it. Is that allowed?",
+      "expected_substrings": ["gift card", "prohibit"],
+      "expect_refusal": false
+    },
+    {
+      "id": "room_salon_gotcha",
+      "query": "I want to take a prospective client to a room salon to celebrate a contract. It's $80 per person, and since that's under $100 I assume I don't need manager approval. Correct?",
+      "expected_substrings": ["prohibit"],
+      "expect_refusal": false
+    },
+    {
+      "id": "out_of_domain",
+      "query": "Can you write me a Python function that reverses a string?",
+      "expected_substrings": [],
+      "expect_refusal": true
+    },
+    {
+      "id": "ungrounded_policy",
+      "query": "What is Altostrat's reimbursement policy for adopting a pet?",
+      "expected_substrings": [],
+      "expect_refusal": true
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+# HR Policy Agent Lab — RAG vs OKF
+
+Build **one agent** — an HR Policy Assistant that answers employee questions
+grounded in the *Altostrat Singapore Employee Policy Handbook* — and build its
+"retrieval brain" **two ways** so you feel the trade-off:
+
+- **Track A — RAG:** Google **Vertex AI Search** over the handbook (semantic search).
+- **Track B — OKF:** Google's **Open Knowledge Format** — a cross-linked markdown
+  bundle the agent *navigates deliberately* (no vector database).
+
+You write the code by instructing **your own coding agent** (Claude Code, Gemini
+CLI, Codex, Antigravity — your choice). Every exercise ships a hint and a suggested
+prompt, so any coding agent works.
+
+---
+
+## What you'll build
+
+The agent is an ADK `LlmAgent` (Gemini). You implement the parts that make it an
+agent; the plumbing is given.
+
+| You write | What it does |
+|---|---|
+| `agent/tools/okf_tool.py` | `list_concepts` / `read_concept` — traverse the OKF bundle |
+| `agent/tools/rag_tool.py` | `search_policy_docs` — query Vertex AI Search |
+| `agent/prompt.py` | grounding + citation instructions |
+| `agent/agent.py` (one block) | construct the `LlmAgent` |
+
+Given for you: the OKF `knowledge/` bundle, the handbook, the Vertex RAG scripts
+(`rag/`), the eval set (`evals/`), config, and the runner/CLI.
+
+---
+
+## The three layers (mental model)
+
+```
+  YOU  ──talk──▶  YOUR CODING AGENT  ──commands+skills──▶  agents-cli  ──▶  THE HR POLICY AGENT
+  (a human)       (Claude Code /                          (a toolkit for      (ADK LlmAgent + Gemini,
+                   Gemini CLI / Codex)                     coding agents)       the thing you build)
+```
+
+`agents-cli` is **not** a chat agent — it's a toolkit that teaches your coding
+agent how to scaffold/run/eval/deploy ADK agents on Google Cloud. Installing it is
+**encouraged, not required**:
+
+```bash
+uvx google-agents-cli setup      # equips your coding agent with ADK skills
+```
+
+---
+
+## Prerequisites
+
+- Python 3.11+ and `pip` (or `uv`).
+- A Gemini API key (free tier): https://aistudio.google.com/apikey
+- For **Track A (RAG)** only: a Google Cloud project with billing, Terraform ≥ 1.5,
+  and `gcloud` (see `rag/README.md`).
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env          # then set GEMINI_API_KEY
+```
+
+## Quickstart (OKF, no cloud)
+
+```bash
+# 1. Confirm the OKF knowledge bundle is well-formed
+python knowledge/check_okf.py knowledge
+
+# 2. Confirm the scaffold imports and the retrieval mode
+python -c "import agent.config as c; print('mode:', c.RETRIEVAL_MODE)"
+
+# 3. Now do the lab: open LAB.md and build the agent yourself.
+#    When you've implemented the OKF tools + prompt + agent, run:
+#    RETRIEVAL_MODE=okf python -m agent.agent "How many days of bereavement leave do I get?"
+```
+
+---
+
+## RAG vs OKF — the point of the lab
+
+| | RAG (Vertex AI Search) | OKF (Open Knowledge Format) |
+|---|---|---|
+| Retrieval | Semantic search returns top-k chunks | Agent reads `index.md`, navigates to the right concept, reads it |
+| Infra | GCP project, data store, ingest pipeline | None — plain `.md` files ("if you can `cat` a file, you can read it") |
+| Best for | Large, messy, unstructured corpora | Curated, structured, stable knowledge |
+| Updates | Re-ingest + re-index | Edit a markdown file, commit |
+| Auditability | Chunk provenance | Exact file + frontmatter `resource` + git history |
+| Gotcha handling | May retrieve a *related* chunk and miss the governing rule | Reads the whole governing concept, cross-links to prohibitions |
+
+> Observed in this lab's own RAG data store: asking *"room salon under $100 — need
+> approval?"* returned the **approval-thresholds** chunk but **missed** the
+> "adult entertainment is prohibited" chunk — exactly the kind of gap OKF's
+> deliberate navigation avoids. You'll see this yourself in Exercise 05.
+
+## Repo map
+
+```
+agent/         # the agent you build (scaffold with TODOs)
+knowledge/     # the OKF bundle (given, complete) + check_okf.py
+rag/           # Track A: terraform + ingest + verify (given)
+data/          # handbook.pdf (source corpus)
+evals/         # policy_eval.json + run_eval.py
+LAB.md         # step-by-step exercises 00 -> 06
+```
+
+See **`LAB.md`** to start.
