@@ -1,7 +1,7 @@
 # Lab: Build the HR Policy Agent (RAG vs OKF)
 
 You'll build one grounded HR Policy Agent, give it two interchangeable retrieval
-brains, and compare them. **Drive your AI coding agent** (`agy`), to write the code — each
+brains, and compare them. **Drive your AI coding agent** (`agy`) to write the code — each
 step has a hint and a ready-to-paste prompt.
 
 Time: ~90 minutes. Track B (OKF) needs no cloud; Track A (RAG) needs a GCP project.

@@ -76,8 +76,8 @@ Given for you: the OKF `knowledge/` bundle, the handbook, the Vertex RAG scripts
 
 ```
   YOU  ──talk──▶  CODING AGENT  ──commands+skills──▶  agents-cli  ──▶  THE HR POLICY AGENT
-  (a human)       (AI pair programmer /                         (a toolkit)       (ADK LlmAgent + Gemini,
-                   launched with `agy`)                                         the thing you build)
+  (a human)       (AI pair programmer,                (a toolkit)       (ADK LlmAgent + Gemini,
+                   launched with `agy`)                                 the thing you build)
 ```
 
 `agents-cli` is a toolkit that teaches your coding agent how to scaffold, run, evaluate, and deploy ADK agents on Google Cloud. Installing it is **encouraged, not required**:
@@ -133,7 +133,7 @@ GOOGLE_CLOUD_LOCATION=global
 
 ---
 
-## Quickstart & Coding with your coding agent
+## Quickstart & Coding with Your AI Agent
 
 ```bash
 # 1. Confirm the OKF knowledge bundle is well-formed
