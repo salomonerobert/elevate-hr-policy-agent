@@ -209,8 +209,7 @@ Signals the runner prints:
 
 ## Wrap-up
 
-> 💸 Run `terraform destroy` (see `rag/README.md`) when you're done — Vertex AI
-> Search is billable.
+> 💸 Run `terraform destroy` (see `rag/README.md`) when you're done with the TRAINING NOT THIS LAB!! Because you will use this agent later in Module 3!!
 
 You learned to measure an agent with a rubric, read a scoreboard to find the real
 weakness, hillclimb with disciplined one-variable changes, extend a rubric, and prove
