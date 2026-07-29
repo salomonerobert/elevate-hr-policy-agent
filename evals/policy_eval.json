@@ -1,14 +1,55 @@
 {
   "name": "HR Policy Agent — golden eval",
-  "description": "Grounded policy Q&A, gotcha cases, multi-hop synthesis, and refusals. Graded two ways: a deterministic 'floor' (expected_substrings / refusal) and an LLM judge against the rubric in evals/RUBRICS.md.",
+  "description": "Grounded policy Q&A, gotcha cases, multi-hop synthesis, and refusals. Graded by an LLM judge against the rubric in evals/RUBRICS.md.",
   "rubric": {
     "scale": [0, 1, 2],
+    "judge_instructions": "You are a STRICT evaluator of an HR Policy Agent that answers questions about the Altostrat Singapore Employee Policy Handbook. You are a harsh grounding checker, not a helpful assistant: the agent must stay grounded in the RETRIEVED EVIDENCE, cite its source, and REFUSE when the evidence does not cover the question.\n\nScore ONLY the dimensions listed for this case. Each score is an integer 0, 1, or 2. Use the 0/1/2 ANCHORS given for each dimension below as the DEFINITION of each score — pick the anchor the answer best matches, and apply it harshly.\n\nTwo rules that span dimensions (everything else lives in the per-dimension anchors):\n- CORRECTNESS and REASONING are INDEPENDENT. CORRECTNESS scores only the final answer's facts and completeness; REASONING scores only whether the answer applied the governing rule / caught the trap / showed the calculation. An answer can be correct-but-unjustified (correctness high, reasoning low) or well-argued-but-wrong on the final number (reasoning shown, correctness low). Do not let one bleed into the other.\n- Do NOT reward confident tone. Score every dimension independently against its own anchor.\n\nReturn STRICT JSON only, no markdown fences, mapping each requested dimension to {\"score\": 0|1|2, \"why\": \"one short line\"}.",
     "dimensions": {
-      "correctness": { "weight": 3, "desc": "Required facts are present and correct (all parts of the question)." },
-      "grounding":   { "weight": 3, "desc": "Every claim is supported by the retrieved policy text; nothing invented, no outside knowledge." },
-      "reasoning":   { "weight": 3, "desc": "Catches the gotcha, applies conditional exceptions, overrides, or shows required calculations." },
-      "abstention":  { "weight": 2, "desc": "Answers when the handbook covers it; refuses when it doesn't or the question is out of domain." },
-      "citation":    { "weight": 1, "desc": "Ends with a Sources section citing the correct policy/section." }
+      "correctness": {
+        "weight": 3,
+        "desc": "The FINAL answer's facts are correct and every sub-question is answered (scores the answer, not the reasoning).",
+        "anchors": {
+          "2": "Every required fact is present and correct, and every sub-question is answered.",
+          "1": "One required part is correct but another is missing or wrong (e.g. answered one sub-question, missed a second, or one number is off).",
+          "0": "A key required fact is wrong or absent."
+        }
+      },
+      "grounding": {
+        "weight": 3,
+        "desc": "Every claim is supported by the RETRIEVED EVIDENCE — nothing invented, no outside knowledge.",
+        "anchors": {
+          "2": "Every substantive claim is supported by the retrieved evidence. A correct refusal that makes no substantive policy claims scores 2 (there is nothing to fabricate).",
+          "1": "Mostly grounded, but one minor claim or embellishment is not found in the retrieved evidence.",
+          "0": "A material fact is fabricated or comes from outside knowledge — a claim that merely happens to be true but is not in the retrieved evidence is still ungrounded ('plausible' is not 'supported'); OR the evidence is empty and the answer still makes substantive policy claims."
+        }
+      },
+      "reasoning": {
+        "weight": 3,
+        "desc": "Whether the answer applies the governing rule: catches the gotcha, applies the conditional exception/override, or shows the required calculation (scores the justification, not the final fact).",
+        "anchors": {
+          "2": "Names the governing rule and applies it — e.g. 'gift cards are a prohibited category, so the $50 limit is irrelevant' — or shows the correct calculation.",
+          "1": "Reaches the right conclusion but the key reasoning is implicit or only partially shown.",
+          "0": "Falls for the trap, applies the wrong rule, or gets the calculation wrong."
+        }
+      },
+      "abstention": {
+        "weight": 2,
+        "desc": "The answer-vs-refuse decision: answer when the handbook covers it, refuse when it doesn't or the question is out of domain.",
+        "anchors": {
+          "2": "Answers when the handbook covers the question; clearly refuses (and offers the in-domain alternative) when it does not or the question is out of domain.",
+          "1": "Right instinct but hedges — e.g. refuses yet still speculates, or answers yet buries it in unnecessary disclaimers.",
+          "0": "Answers something it should have refused, or refuses something the handbook actually covers."
+        }
+      },
+      "citation": {
+        "weight": 1,
+        "desc": "Ends with a Sources section citing a handbook section that supports the answer.",
+        "anchors": {
+          "2": "Ends with a Sources section citing a handbook section that genuinely supports the answer.",
+          "1": "A citation is present but is generic, wrong, or not among the sections that support the answer.",
+          "0": "No citation, or a fabricated / nonexistent source."
+        }
+      }
     },
     "gates": {
       "grounding_zero_caps_case_at": 0.40,
@@ -32,8 +73,6 @@
       "id": "sick_leave_and_mc",
       "smoke": true,
       "query": "How many days of paid outpatient sick leave do I get per year, and what is the deadline to submit a Medical Certificate if I'm out sick for 3 days?",
-      "expect_refusal": false,
-      "expected_substrings": ["14", "48"],
       "dimensions": ["correctness", "grounding", "citation"],
       "expected_sources": ["1.1", "19.2", "19.4"],
       "ground_truth_notes": "Up to 14 days paid outpatient sick leave per calendar year at 100% of base salary. If sick more than two work days, a Medical Certificate must be submitted (via WorkWeek) within 48 hours."
@@ -42,8 +81,6 @@
       "id": "vacation_accrual_and_shift",
       "smoke": false,
       "query": "I have been working at Altostrat for 8 years and I work 12-hour shifts. How many vacation days do I earn per year, and how many vacation days do I log to take a single 12-hour shift off?",
-      "expect_refusal": false,
-      "expected_substrings": ["21", "1.5"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["1.2", "20.2"],
       "ground_truth_notes": "Accrual tiers: 1-6 years = 20 days, 7-10 years = 21 days, 11+ years = 22 days. 8 years falls in the 7-10 tier => 21 days/year. A vacation day is an 8-hour block, so a 12-hour shift = 1.5 vacation days."
@@ -52,8 +89,6 @@
       "id": "ramp_back_time",
       "smoke": false,
       "query": "What are the working hour and pay requirements during the 2-week Ramp-Back time?",
-      "expect_refusal": false,
-      "expected_substrings": ["50%", "100%"],
       "dimensions": ["correctness", "grounding", "citation"],
       "expected_sources": ["2.3", "28"],
       "ground_truth_notes": "During the up-to-2-weeks ramp-back period you must work at least 50% of your normal weekly hours while receiving 100% of your normal salary."
@@ -62,8 +97,6 @@
       "id": "host_gift_card_gotcha",
       "smoke": true,
       "query": "I'm staying at my cousin's house on a work trip instead of a hotel. As a thank-you I want to buy him a $45 gift card and expense it. Is that allowed?",
-      "expect_refusal": false,
-      "expected_substrings": ["prohibit"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["4.3", "5.2", "14.2"],
       "gotcha": "A value under a spending limit does not make a prohibited category allowed.",
@@ -73,8 +106,6 @@
       "id": "room_salon_gotcha",
       "smoke": false,
       "query": "I want to take a prospective client to a room salon to celebrate a contract. It's $80 per person, and since that's under $100 I assume I don't need manager approval. Correct?",
-      "expect_refusal": false,
-      "expected_substrings": ["prohibit"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["5.2", "13.4", "14.2"],
       "gotcha": "The approval threshold applies only to permitted courtesies; adult entertainment is prohibited outright.",
@@ -84,8 +115,6 @@
       "id": "pet_bereavement_distractor",
       "smoke": true,
       "query": "My golden retriever passed away this morning after 12 years with our family. How many days of paid bereavement leave can I log in WorkWeek?",
-      "expect_refusal": false,
-      "expected_substrings": ["not apply", "0"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["3.1", "22.2"],
       "gotcha": "Semantic keyword match returns 4 weeks for human loved ones, but pet loss is explicitly excluded from paid bereavement leave.",
@@ -95,8 +124,6 @@
       "id": "group_meal_seniority_trap",
       "smoke": false,
       "query": "I am an L4 Software Engineer. I attended a project celebration dinner costing $85 per person with my L5 Tech Lead, my L6 Manager, and our L7 Director. Can I pay the bill with my Corporate Card and submit the Concur expense report for reimbursement?",
-      "expect_refusal": false,
-      "expected_substrings": ["senior", "director"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["4.4", "04"],
       "gotcha": "The dollar amount ($85) is under the $120 cap, but the submission hierarchy requires the most senior person present to pay and submit.",
@@ -106,8 +133,6 @@
       "id": "unpaid_personal_leave_multihop",
       "smoke": false,
       "query": "I have been at Altostrat for 3 years, received a 'Significant Impact' GRAD rating, and want to take 45 days of continuous unpaid personal leave. I currently have 15 days of accrued vacation remaining in my balance. Can my direct manager approve this unpaid leave today?",
-      "expect_refusal": false,
-      "expected_substrings": ["director", "vacation"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["3.3", "18.2"],
       "gotcha": "Multi-condition synthesis: leaves >30 days reclassify as Personal Leave (requires Director approval), and remaining vacation must be fewer than 10 days.",
@@ -117,8 +142,6 @@
       "id": "aged_expense_approval_level",
       "smoke": false,
       "query": "I found an out-of-pocket taxi receipt for $60 from a business trip 75 days ago. My direct manager is happy to approve it in Concur. Is direct manager approval sufficient for this reimbursement?",
-      "expect_refusal": false,
-      "expected_substrings": ["director", "60"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["4.2", "04"],
       "gotcha": "Aged expenses override the normal approval workflow based on transaction age.",
@@ -128,19 +151,15 @@
       "id": "shared_parental_leave_father_deduction",
       "smoke": false,
       "query": "My wife and I both work at Altostrat in Singapore. We just welcomed a newborn. If I (the father) allocate 2 weeks of my Shared Parental Leave to my wife, how many weeks of Baby Bonding Leave do I receive?",
-      "expect_refusal": false,
-      "expected_substrings": ["16"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
-      "expected_sources": ["2.2", "26.2"],
-      "gotcha": "Dual-employee parents donating SPL face a direct deduction from the standard 18-week Baby Bonding Leave.",
-      "ground_truth_notes": "Standard Baby Bonding Leave (BBL) is 18 weeks. However, Section 2.2 explicitly provides an exception: if both parents are Altostrat employees and the father allocates SPL to his partner, his BBL is reduced to 16 or 17 weeks depending on the allocation. Allocating 2 weeks reduces BBL from 18 to 16 weeks."
+      "expected_sources": ["26.3"],
+      "gotcha": "Don't assume donating SPL costs the father Baby Bonding Leave: for Singapore, when both parents are Altostrat employees, the father's BBL is NOT reduced by an SPL allocation.",
+      "ground_truth_notes": "Baby Bonding Leave is 18 weeks. Section 26.3 (Singapore Shared Parental Leave Scenarios, effective April 1, 2026) is the governing Singapore-specific rule: when both parents are Altostrat employees, the father's Baby Bonding Leave remains 18 weeks and is NOT reduced by the SPL sharing arrangement. Therefore the father still receives 18 weeks. (The older global Section 2.2 mentions a 16-17 week reduction, but the Singapore-specific 26.3 governs here and applies no reduction.)"
     },
     {
       "id": "remote_confidential_public_place",
       "smoke": false,
       "query": "I am approved for full remote work. Can I work on our confidential Project Titan codebase from a local Starbucks coffee shop as long as I use headphones and a privacy screen?",
-      "expect_refusal": false,
-      "expected_substrings": ["prohibit", "public"],
       "dimensions": ["correctness", "grounding", "reasoning", "citation"],
       "expected_sources": ["5.4", "6.1", "16.2"],
       "gotcha": "Privacy measures (headphones, screen) apply away from the office, but confidential projects are strictly banned in public settings regardless of accessories.",
@@ -150,8 +169,6 @@
       "id": "out_of_domain",
       "smoke": false,
       "query": "Can you write me a Python function that reverses a string?",
-      "expect_refusal": true,
-      "expected_substrings": [],
       "dimensions": ["abstention", "grounding"],
       "expected_sources": [],
       "ground_truth_notes": "This is out of domain (not HR policy). The agent should politely decline and offer to help with HR policy instead. It must NOT write the code and must NOT fabricate a policy."
@@ -160,8 +177,6 @@
       "id": "ungrounded_policy",
       "smoke": true,
       "query": "What is Altostrat's reimbursement policy for adopting a pet?",
-      "expect_refusal": true,
-      "expected_substrings": [],
       "dimensions": ["abstention", "grounding"],
       "expected_sources": [],
       "ground_truth_notes": "The handbook has no pet-adoption reimbursement policy. The agent should say it has no policy on file for this, rather than inventing an amount or procedure."

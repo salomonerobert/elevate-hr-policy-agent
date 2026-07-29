@@ -7,7 +7,13 @@ wrong policy*. This rubric fixes that.
 
 Every answer is scored on up to **5 dimensions**, each **0 / 1 / 2**, then rolled up
 to a **score out of 100**. The rubric lives in `evals/policy_eval.json` (the `rubric`
-block) so the grader and this document never drift apart.
+block) so the grader and this document never drift apart. Each dimension now carries
+explicit **`anchors`** — the exact 0/1/2 criteria — and those anchors are fed verbatim
+into the judge prompt, so the judge scores against the *same* definitions you read here
+(the table below is a readable summary of them). The judge's cross-cutting instructions
+(its strict stance, the correctness-vs-reasoning independence rule, the output format)
+live alongside them in `rubric.judge_instructions`, so the **entire** judge prompt is
+data — you can retune the grader without touching Python.
 
 ## The 5 dimensions
 
@@ -48,20 +54,23 @@ single question dominates the number you're improving.
   gotchas + both refusals) — the ones that separate real grounding from lucky
   keyword matches.
 
-## Two graders, on purpose
+## The grader: an LLM judge
 
-1. **Floor** (`--judge off`, default): the old deterministic substring/refusal check.
-   Fast, free, and impossible for an LLM judge to talk its way around. Always runs.
-2. **Judge** (`--judge on`): an LLM grades the 5 dimensions using the ground-truth
-   notes **and the evidence the agent actually retrieved** (so it can catch "right
-   answer, but from thin air").
+The judge grades the 5 dimensions using the ground-truth notes **and the evidence
+the agent actually retrieved** (so it can catch "right answer, but from thin air").
+It defaults to a stronger model than the agent (`gemini-3.6-flash` vs the agent's
+`gemini-3.5-flash`) so the grader doesn't share the agent's blind spots.
 
-If the judge gives a high score but the **floor fails**, the runner prints a
-`⚠ SUSPECT` line — trust the floor and go look.
+> An earlier version also ran a deterministic "floor" (substring / refusal-phrase
+> checks) as a fast guard. It was removed: on the gotcha cases it gave false
+> confidence — a substring like `prohibit` matches both "is prohibited" and "is
+> **not** prohibited" — and it couldn't check grounding against the retrieved
+> evidence. The judge is now the single source of truth. (An answer whose judge
+> score rests on a fabricated fact still gets flagged: `⚠ SUSPECT (GROUNDING=0)`.)
 
 ## How to *read* a result (this is the skill)
 
-When you run `--judge on`, you get a scoreboard like:
+When you run the eval, you get a scoreboard like:
 
 ```
 case                            corr  grou  reas  abst  cita   case%

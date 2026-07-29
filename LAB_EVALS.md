@@ -15,33 +15,31 @@ by fixing the real weakness, not by memorizing the test.
 number (`evals/RUBRICS.md`). *Hillclimbing* is the loop: measure → find the weakest
 spot → change one thing → measure again → keep it if the number went up.
 
+> 🆕 **New here?** Read `evals/EVAL_WALKTHROUGH.md` first — a plain-language tour of
+> what `run_eval.py` actually does end-to-end (anatomy of a case, how the judge scores,
+> how to read the scoreboard). Come back here for the exercises.
+
 > ⚠️ The whole point is to build a genuinely better agent — **not** to hardcode the 7
 > answers. At the end, the trainer reveals a *hidden* test to check you didn't cheat.
 >
-> 💡 **Note on Evaluation Tooling:** In this lab, we use `evals/run_eval.py` because it includes deterministic floor checks tailored specifically to the handbook gotchas (e.g. spend limits and citation rules) without requiring GCP project setup. In production ADK projects on Google Cloud, you can run standardized evaluations across multiple models using `agents-cli eval run`.
+> 💡 **Note on Evaluation Tooling:** In this lab, we use `evals/run_eval.py` because it pairs an LLM judge with a rubric tailored specifically to the handbook gotchas (e.g. spend limits and citation rules) without requiring GCP project setup. In production ADK projects on Google Cloud, you can run standardized evaluations across multiple models using `agents-cli eval run`.
 
 ---
 
 ## Exercise 0 — Measure a baseline
 
-First the fast, free grader (the "floor" — deterministic substring/refusal checks):
+Run the eval. The **LLM judge** grades each answer on 5 dimensions (see
+`evals/RUBRICS.md`):
 
 ```bash
 uv run python evals/run_eval.py --mode okf --target agent
 ```
 
-You get `[PASS]/[FAIL]` per case and `FLOOR: N/7`. That's a coarse signal. Now the
-real scorecard — the **LLM judge** grading 5 dimensions (see `evals/RUBRICS.md`):
-
-```bash
-uv run python evals/run_eval.py --mode okf --target agent --judge on
-```
-
 You'll see a scoreboard and a **TOTAL / 100**. Write it down — this is your baseline.
 (The runner also saves it, so the next run prints the change.)
 
-> Iterating fast? Use `--subset smoke` (3 representative cases) for the inner loop,
-> and do a full `--judge on` run before you trust a number.
+> Iterating fast? Use `--subset smoke` (3 representative cases) for the inner loop
+> (fewer judge calls), and do a full run before you trust a number.
 
 ---
 
@@ -57,7 +55,7 @@ room_salon_gotcha                  1     2     0     -     1      45
 Answer these for your own run (this is the skill, not busywork):
 1. Which **case** is lowest? Which **dimension** is dragging it down?
 2. Is it a *wrong answer* (Correctness/Reasoning low) or a *right answer graded low*
-   (Grounding/Citation low, or a phrasing miss the floor flagged)?
+   (Grounding/Citation low)?
 3. Does a low score mean the agent **retrieved the wrong thing**, or **retrieved the
    right thing and reasoned badly**? (Open the trajectory to check —
    `uv run adk web .` — and see which concept/chunk it actually read.)
@@ -116,7 +114,7 @@ always in **retrieval** (tool/index/params), not the prompt — the prompt is sh
 Compare them directly:
 
 ```bash
-uv run python evals/run_eval.py --target agent --judge on --compare-modes
+uv run python evals/run_eval.py --target agent --compare-modes
 ```
 
 ---
@@ -128,10 +126,10 @@ Using a rubric is half the skill; **designing** one is the other half. The rubri
 
 - **Add a dimension.** e.g. *Conciseness* (0/1/2) or *Tone/empathy*. Add it to the
   `rubric.dimensions` block (with a weight and description) and to the `dimensions`
-  list of the cases it applies to. Re-run `--judge on` and see how scores shift.
+  list of the cases it applies to. Re-run the eval and see how scores shift.
 - **Add a case.** Write a new question grounded in the handbook (a new gotcha, or a
-  multi-part factual). Give it `expected_substrings`, `ground_truth_notes`,
-  `expected_sources`, and the `dimensions` it exercises.
+  multi-part factual). Give it `ground_truth_notes`, `expected_sources`, and the
+  `dimensions` it exercises (plus a `gotcha` note if it's a trap).
 
 Then answer: did your change make the rubric **more discriminating** (better answers
 score higher) or just noisier? Where is this rubric still **blind**? (Hint: could a
@@ -149,7 +147,7 @@ have it, run it **once**:
 
 ```bash
 # your trainer will provide evals/policy_eval_heldout.json first
-uv run python evals/run_eval.py --mode okf --target agent --judge on \
+uv run python evals/run_eval.py --mode okf --target agent \
   --eval-file evals/policy_eval_heldout.json
 ```
 
@@ -168,13 +166,11 @@ named root causes.
 
 ## Reference — the score in one place
 
-Two graders run; understand both:
-
-- **Floor** (always): deterministic. Factual cases need all `expected_substrings`;
-  refusal cases need a refusal phrase. Cheap and ungameable-by-an-LLM, so it's a
-  guard, not the grade.
-- **Judge** (`--judge on`): an LLM scores each answer on the rubric dimensions
-  (0/1/2), weighted into a per-case % and a **TOTAL /100**. See `evals/RUBRICS.md`.
+An **LLM judge** scores each answer on the rubric dimensions (0/1/2), weighted into
+a per-case % and a **TOTAL /100**. See `evals/RUBRICS.md`. It defaults to a stronger
+model than the agent (`gemini-3.6-flash` vs `gemini-3.5-flash`) so it doesn't share
+the agent's blind spots. (The old deterministic "floor" was removed — it gave false
+confidence on the gotcha cases and couldn't check grounding.)
 
 Reading a scoreboard row — the low **dimension** tells you the **lever**:
 
@@ -187,12 +183,14 @@ Reading a scoreboard row — the low **dimension** tells you the **lever**:
 | `abst` | answered something it should refuse | prompt |
 
 Signals the runner prints:
-- **`BADGE`** — pass = ≥80% on the four hard cases (both gotchas + both refusals).
+- **`BADGE`** — pass = ≥80% on the hard cases (the gotchas + refusals listed in
+  `rubric.gates.hard_cases`).
 - **`DELTA`** — change vs your last run for this mode/target, plus any regressions.
-- **`⚠ SUSPECT: floor passed but GROUNDING=0`** — the answer hit the keywords but
-  isn't supported by what was retrieved. This is the tell-tale of **hardcoding /
-  teaching to the test** — fix it, don't celebrate it.
-- **`⚠ SUSPECT: judge high but floor failed`** — usually a phrasing mismatch; inspect.
+- **`⚠ SUSPECT (GROUNDING=0)`** — the answer's score rests on a fact not supported by
+  what was retrieved. This is the tell-tale of **hardcoding / teaching to the test** —
+  fix it, don't celebrate it.
+- **`⚠ ERRORED`** — the agent crashed or the judge call failed; the case is scored **0**
+  (not dropped), so investigate rather than ignore.
 
 ## Troubleshooting
 
@@ -203,7 +201,7 @@ Signals the runner prints:
 | Score won't move as you iterate | You're changing more than one thing, or fixing the *instance* not the *class*. Change one lever; write a general rule. |
 | Added a rubric dimension but total barely changes | Your answers already max it — try a case that stresses it; the new column now shows on the scoreboard. |
 | `policy_eval_heldout.json` not found | It's trainer-provided (Exercise 5) — not in the learner repo by design. |
-| Judge is slow/expensive | Use `--subset smoke` while iterating; do a full `--judge on` run only to lock a number. |
+| Judge is slow/expensive | Use `--subset smoke` while iterating; do a full run only to lock a number. |
 
 ---
 

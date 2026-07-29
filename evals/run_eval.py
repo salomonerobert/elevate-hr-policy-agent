@@ -1,54 +1,63 @@
 #!/usr/bin/env python3
 """Eval runner for the HR Policy Agent — used in Lab 2 (evals & hillclimbing).
 
-Two grading layers:
+Grading is done entirely by an LLM JUDGE: it scores each answer against the rubric
+in policy_eval.json across several dimensions (0/1/2), producing a score /100 and a
+run-over-run delta so you can watch the score climb. See evals/RUBRICS.md.
 
-  1. FLOOR (default, fast, free): deterministic checks. Factual cases must contain
-     all `expected_substrings`; refusal cases must contain a refusal phrase. This is
-     cheap and ungameable-by-an-LLM, so it's always run as a sanity guard.
-
-  2. JUDGE (--judge on): an LLM grades each answer against the rubric in
-     policy_eval.json across several dimensions (0/1/2), producing a score /100 and
-     a run-over-run delta so you can watch the score climb. See evals/RUBRICS.md.
+(The old deterministic "floor" — substring / refusal-phrase checks — has been
+removed. It gave false confidence on the gotcha cases: a substring like "prohibit"
+matches both "is prohibited" and "is NOT prohibited", so a trap-failing answer could
+still pass. The judge grades grounding against the evidence the agent actually
+retrieved, which the floor could not do.)
 
 Usage:
-    # fast floor only (quick inner loop)
+    # full rubric scoring
     uv run python evals/run_eval.py --mode okf --target agent
 
-    # full rubric scoring with the LLM judge
-    uv run python evals/run_eval.py --mode okf --target agent --judge on
-
-    # quick 3-case smoke subset while iterating
-    uv run python evals/run_eval.py --mode okf --target agent --judge on --subset smoke
+    # quick 3-case smoke subset while iterating (fewer judge calls)
+    uv run python evals/run_eval.py --mode okf --target agent --subset smoke
 
     # score both brains side by side
-    uv run python evals/run_eval.py --target agent --judge on --compare-modes
+    uv run python evals/run_eval.py --target agent --compare-modes
 
-Judge model: set EVAL_JUDGE_MODEL (default gemini-3.5-flash). It should be a
-different, ideally stronger model than the agent under test.
+Judge model: set EVAL_JUDGE_MODEL (default gemini-3.6-flash — deliberately a
+newer/stronger model than the agent's default gemini-3.5-flash, so the grader
+doesn't share the agent's blind spots).
 """
 import argparse
 import json
+import logging
 import os
+import re
 import statistics
 import sys
+import warnings
 from datetime import datetime, timezone
+
+# ADK emits an [EXPERIMENTAL] UserWarning ("FeatureName.JSON_SCHEMA_FOR_FUNC_DECL
+# is enabled") whenever it builds tool function-declarations. It's an internal
+# library feature flag, not something our code enables — silence it so it doesn't
+# clutter the per-case logs. (The old "migrate to the async method" deprecations
+# are gone at the source: agent.py now drives the async ADK APIs.)
+warnings.filterwarnings("ignore", message=r".*JSON_SCHEMA_FOR_FUNC_DECL.*")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-REFUSAL_HINTS = [
-    "don't have", "do not have", "not on file", "no policy", "cannot", "can't",
-    "unable", "only assist", "only help", "outside", "decline", "not able to",
-    "does not contain", "not contain", "not covered", "not in the handbook",
-    "no information", "doesn't cover", "does not cover", "no policy on file",
-]
-
 DIM_ORDER = ["correctness", "grounding", "reasoning", "abstention", "citation"]
 LAST_RUN = os.path.join(HERE, "last_run.json")
 HISTORY = os.path.join(HERE, "history.jsonl")
+
+# Progress logging goes to STDERR so it never corrupts the scoreboard/report,
+# which is printed to STDOUT. Use --verbose/-v to bump this to DEBUG.
+log = logging.getLogger("eval")
+_handler = logging.StreamHandler(sys.stderr)
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+log.addHandler(_handler)
+log.setLevel(logging.INFO)
 
 
 # --------------------------------------------------------------------------- #
@@ -67,22 +76,7 @@ def load_agent(target: str):
 
 
 # --------------------------------------------------------------------------- #
-# Layer 1 — the floor (deterministic)
-# --------------------------------------------------------------------------- #
-def floor_check(answer: str, case: dict):
-    low = answer.lower()
-    if case["expect_refusal"]:
-        if any(h in low for h in REFUSAL_HINTS):
-            return True, "refused as expected"
-        return False, "expected a refusal, got a substantive answer"
-    missing = [s for s in case["expected_substrings"] if s.lower() not in low]
-    if missing:
-        return False, f"missing: {missing}"
-    return True, "all expected substrings present"
-
-
-# --------------------------------------------------------------------------- #
-# Layer 2 — the LLM judge (rubric scoring)
+# The LLM judge (rubric scoring)
 # --------------------------------------------------------------------------- #
 def evidence_to_str(evidence: list, limit: int = 8000) -> str:
     """Flatten the retrieved-tool payloads into text for the judge."""
@@ -95,34 +89,67 @@ def evidence_to_str(evidence: list, limit: int = 8000) -> str:
     return "\n\n".join(parts)[: limit * 2]
 
 
-JUDGE_INSTRUCTIONS = """You are a STRICT evaluator of an HR Policy Agent that answers \
-questions about the Altostrat Singapore Employee Policy Handbook. The agent must be \
-grounded in the RETRIEVED EVIDENCE, cite its source, and REFUSE when the evidence \
-does not cover the question. You are a harsh grounding checker, not a helpful assistant.
+# The judge preamble now lives in the rubric block of the eval JSON
+# (rubric.judge_instructions) so the ENTIRE rubric — cross-cutting rules and
+# per-dimension anchors alike — is data-driven and editable without touching code.
+# This constant is only a fallback if a rubric omits the field.
+_FALLBACK_JUDGE_INSTRUCTIONS = (
+    "You are a STRICT evaluator. Score ONLY the listed dimensions, each an integer "
+    "0/1/2, using the 0/1/2 anchors below as the definition of each score. Do not "
+    "reward confident tone. Return STRICT JSON only, no markdown fences, mapping each "
+    'requested dimension to {"score": 0|1|2, "why": "one short line"}.'
+)
 
-Score ONLY the dimensions listed. Each score is an integer 0, 1, or 2.
 
-Scoring rules (apply harshly):
-- GROUNDING: if the answer states any fact NOT present in RETRIEVED EVIDENCE, score
-  grounding 0 even if the fact happens to be true. "Plausible" is not "supported".
-- If RETRIEVED EVIDENCE is empty AND the answer makes substantive policy claims,
-  grounding = 0.
-- REFUSAL cases (the ground-truth notes say to refuse / no policy exists): a clear
-  refusal earns abstention = 2; a fabricated answer earns 0 on grounding and abstention.
-- REASONING/gotcha: 2 only if the answer catches the trap (a value under a spend
-  limit does NOT make a prohibited category — gift cards, adult entertainment —
-  allowed) or shows the required calculation; 0 if it falls for the trap.
-- Do NOT reward confident tone. Score each dimension independently.
+def _retrieval_summary(evidence: list) -> str:
+    """A short, human-readable note of WHAT the agent retrieved for a case:
+    which concepts it actually read (read_concept → title) plus a count of any
+    other retrieval calls (e.g. browsing the catalog with list_concepts, or RAG
+    segments). Logged per case so a low grounding/correctness score can be traced
+    to 'it never read the governing concept' rather than guessed at."""
+    if not evidence:
+        return "nothing"
+    read, other = [], {}
+    for e in evidence:
+        tool = e.get("tool", "?")
+        payload = e.get("payload")
+        if tool == "read_concept" and isinstance(payload, dict):
+            label = payload.get("title") or payload.get("resource") or payload.get("id")
+            if not label:  # fall back to the "# 26.3 ..." heading in the content
+                m = re.match(r"\s*#+\s*(.+)", str(payload.get("content", "")))
+                label = m.group(1).strip() if m else "?"
+            read.append(str(label))
+        elif tool == "list_concepts" and isinstance(payload, dict):
+            other["list_concepts"] = other.get("list_concepts", 0) + 1
+        else:
+            # RAG or unknown tool: surface a source/title if present, else count it
+            if isinstance(payload, dict):
+                label = payload.get("title") or payload.get("source") or payload.get("resource")
+                if label:
+                    read.append(str(label))
+                    continue
+            other[tool] = other.get(tool, 0) + 1
+    parts = []
+    if read:
+        parts.append("read [" + "; ".join(read) + "]")
+    parts += [f"{t}×{n}" for t, n in other.items()]
+    return " | ".join(parts) if parts else "nothing"
 
-Return STRICT JSON only, no markdown fences, mapping each requested dimension to
-{"score": 0|1|2, "why": "one short line"}."""
+
+def _dim_block(rubric, d):
+    """Render one dimension's description + its 0/1/2 anchors for the judge."""
+    dd = rubric["dimensions"][d]
+    lines = [f"- {d}: {dd['desc']}"]
+    for s in ("2", "1", "0"):
+        anchor = dd.get("anchors", {}).get(s)
+        if anchor:
+            lines.append(f"    {s} = {anchor}")
+    return "\n".join(lines)
 
 
 def build_judge_prompt(case, rubric, answer, evidence_str):
     dims = case["dimensions"]
-    dim_lines = "\n".join(
-        f"- {d}: {rubric['dimensions'][d]['desc']}" for d in dims
-    )
+    dim_lines = "\n".join(_dim_block(rubric, d) for d in dims)
     gt = case.get("ground_truth_notes") or "(none)"
     gotcha = case.get("gotcha")
     gotcha_line = f"\nGOTCHA TO CATCH: {gotcha}" if gotcha else ""
@@ -135,7 +162,8 @@ def build_judge_prompt(case, rubric, answer, evidence_str):
         f"answer counts; a missing, wrong, or fabricated citation does not.\n"
         if srcs else ""
     )
-    return f"""{JUDGE_INSTRUCTIONS}
+    instructions = rubric.get("judge_instructions") or _FALLBACK_JUDGE_INSTRUCTIONS
+    return f"""{instructions}
 
 === QUESTION ===
 {case['query']}
@@ -165,6 +193,26 @@ def _parse_json(text: str):
     return json.loads(text.strip())
 
 
+def _coerce_score(entry):
+    """Normalize one dimension's judge output into (int_score, why).
+
+    The judge is asked for {"score": 0|1|2, "why": "..."} per dimension, but it
+    sometimes returns a bare number (or a numeric string) for a dimension instead.
+    Accept every shape, clamp to 0..2, and never raise — a malformed dimension
+    scores 0 rather than crashing the whole case.
+    """
+    why = ""
+    val = entry
+    if isinstance(entry, dict):
+        why = str(entry.get("why", ""))
+        val = entry.get("score", 0)
+    try:
+        score = int(val)
+    except (TypeError, ValueError):
+        score = 0
+    return max(0, min(2, score)), why
+
+
 def judge_case(case, rubric, answer, evidence_str, model, n=1):
     """Call the LLM judge n times; return {dim: median_score} + justifications."""
     from google import genai
@@ -185,11 +233,15 @@ def judge_case(case, rubric, answer, evidence_str, model, n=1):
         parsed = _parse_json(resp.text)
         scores = {}
         for d in case["dimensions"]:
-            entry = parsed.get(d, {})
-            scores[d] = int(entry.get("score", 0))
-            justifications[d] = entry.get("why", "")
+            score, why = _coerce_score(parsed.get(d, {}))
+            scores[d] = score
+            justifications[d] = why
         runs.append(scores)
-    median = {d: int(statistics.median([r[d] for r in runs])) for d in case["dimensions"]}
+    # median_low keeps the result an actual observed integer score (0/1/2): with an
+    # even n, plain statistics.median averages the two middle values (e.g. 1 and 2 ->
+    # 1.5) and int() would truncate that to 1, biasing every split decision downward.
+    # median_low is deterministic and breaks ties down, matching the harsh grader.
+    median = {d: statistics.median_low([r[d] for r in runs]) for d in case["dimensions"]}
     return median, justifications
 
 
@@ -210,24 +262,39 @@ def score_case(case, rubric, dim_scores):
 # --------------------------------------------------------------------------- #
 # Run one suite
 # --------------------------------------------------------------------------- #
-def run_suite(cases, rubric, runner, use_judge, judge_model, n):
+def run_suite(cases, rubric, runner, judge_model, n):
     results = []
-    for c in cases:
+    total = len(cases)
+    for i, c in enumerate(cases, 1):
+        log.info("[%d/%d] running case %s", i, total, c["id"])
+        log.debug("query: %s", c["query"])
         try:
-            answer, evidence = runner.run_query_traced(c["query"])
+            # Each case gets its OWN session (session_id = case id) so cases are
+            # isolated: without this every case shares one session and the agent
+            # sees prior cases' Q&A in context — it can answer from memory instead
+            # of retrieving (grounding then reads as 0 items), and results become
+            # order-dependent. Per-case sessions make each run reproducible.
+            answer, evidence = runner.run_query_traced(c["query"], session_id=c["id"])
         except Exception as e:  # noqa: BLE001
+            log.error("case %s failed in agent: %s", c["id"], e)
             results.append({"id": c["id"], "error": str(e)})
             continue
-        floor_pass, floor_why = floor_check(answer, c)
-        row = {"id": c["id"], "floor_pass": floor_pass, "floor_why": floor_why}
-        if use_judge:
-            try:
-                dim_scores, why = judge_case(c, rubric, answer, evidence_to_str(evidence), judge_model, n)
-                row["dims"] = dim_scores
-                row["why"] = why
-                row["pct"] = score_case(c, rubric, dim_scores)
-            except Exception as e:  # noqa: BLE001
-                row["error"] = f"Judge error ({e})"
+        log.info("case %s retrieved %d item(s): %s",
+                 c["id"], len(evidence or []), _retrieval_summary(evidence))
+        log.debug("answer preview: %s", (answer or "")[:200])
+        row = {"id": c["id"]}
+        try:
+            log.info("judging case %s with %s", c["id"], judge_model)
+            dim_scores, why = judge_case(c, rubric, answer, evidence_to_str(evidence), judge_model, n)
+            row["dims"] = dim_scores
+            row["why"] = why
+            row["pct"] = score_case(c, rubric, dim_scores)
+            log.info("case %s scores %s -> %.0f%%", c["id"], dim_scores, row["pct"] * 100)
+            for d, j in why.items():
+                log.debug("case %s judge[%s]: %s", c["id"], d, j)
+        except Exception as e:  # noqa: BLE001
+            log.warning("case %s failed in judge: %s", c["id"], e)
+            row["error"] = f"Judge error ({e})"
         results.append(row)
     return results
 
@@ -235,19 +302,7 @@ def run_suite(cases, rubric, runner, use_judge, judge_model, n):
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
-def print_report(results, use_judge, mode, target, rubric):
-    floor_pass = sum(1 for r in results if r.get("floor_pass"))
-    n = len(results)
-
-    if not use_judge:
-        for r in results:
-            if "error" in r:
-                print(f"[ERROR] {r['id']}: {r['error']}")
-            else:
-                print(f"[{'PASS' if r['floor_pass'] else 'FAIL'}] {r['id']} — {r['floor_why']}")
-        print(f"\nFLOOR: {floor_pass}/{n} passed  (mode={mode}, target={target})")
-        return None
-
+def print_report(results, mode, target, rubric):
     # columns derived from the rubric (so an added dimension actually shows up)
     dim_order = list(rubric.get("dimensions", {}).keys()) or DIM_ORDER
     hdr = "case".ljust(30) + "".join(d[:4].rjust(6) for d in dim_order) + "   case%"
@@ -261,32 +316,35 @@ def print_report(results, use_judge, mode, target, rubric):
         pct_str = f"{r['pct']*100:5.0f}" if "pct" in r else "  N/A"
         print(f"{r['id'][:29].ljust(30)}{cells}   {pct_str}")
     scored = [r for r in results if "pct" in r]
-    total = 100 * sum(r["pct"] for r in scored) / len(scored) if scored else 0.0
+    errored = [r["id"] for r in results if "error" in r]
+    # Errored cases (agent crash or judge failure) count as 0 — a failure, not an
+    # omission. Dropping them would shrink the denominator and inflate the score,
+    # hiding the very cases that need investigating.
+    n = len(results)
+    by_id = {r["id"]: r.get("pct", 0.0) for r in results}
+    total = 100 * sum(by_id.values()) / n if n else 0.0
     print("-" * len(hdr))
     print(f"{'TOTAL'.ljust(30)}{''.join(' ' * 6 for _ in dim_order)}   {total:5.1f} / 100")
-    print(f"FLOOR (deterministic): {floor_pass}/{n} passed")
+    if errored:
+        print(f"⚠  ERRORED (scored 0 in TOTAL — investigate: agent crash or judge failure): {errored}")
 
-    # anti-gaming alarms
-    s1 = [r["id"] for r in scored if not r.get("floor_pass") and r["pct"] > 0.7]
-    if s1:
-        print(f"⚠  SUSPECT (judge high but floor failed — check phrasing/grader): {s1}")
-    s2 = [r["id"] for r in scored if r.get("floor_pass") and r["dims"].get("grounding") == 0]
+    # anti-gaming alarm: a high case score built on ungrounded/hardcoded facts
+    s2 = [r["id"] for r in scored if r["dims"].get("grounding") == 0]
     if s2:
-        print(f"⚠  SUSPECT (floor passed but GROUNDING=0 — likely hardcoded/ungrounded): {s2}")
+        print(f"⚠  SUSPECT (GROUNDING=0 — likely hardcoded/ungrounded): {s2}")
 
-    # badge (gates)
+    # badge (gates) — a missing/errored hard case counts as 0 (never a free pass)
     gates = rubric.get("gates", {})
     hard = gates.get("hard_cases", [])
     thr = gates.get("badge_min_on_hard_cases", 0.8)
     if hard:
-        by_id = {r["id"]: r["pct"] for r in scored}
-        got = {h: by_id.get(h) for h in hard if h in by_id}
-        ok = got and all(v >= thr for v in got.values())
+        got = {h: by_id.get(h, 0.0) for h in hard}
+        ok = all(v >= thr for v in got.values())
         fails = [h for h, v in got.items() if v < thr]
         print(f"BADGE (>= {int(thr*100)}% on hard cases {hard}): "
               f"{'✅ PASS' if ok else '❌ not yet'}"
               + (f" — below bar: {fails}" if fails else ""))
-    return {"total": total, "per_case": {r["id"]: r["pct"] for r in scored}}
+    return {"total": total, "per_case": by_id}
 
 
 def show_delta_and_save(summary, mode, target):
@@ -321,6 +379,7 @@ def show_delta_and_save(summary, mode, target):
     json.dump(all_runs, open(LAST_RUN, "w"), indent=2)
     with open(HISTORY, "a") as fh:
         fh.write(json.dumps({"key": key, **stamped}) + "\n")
+    log.info("saved baseline/delta for %s to %s (also appended to %s)", key, LAST_RUN, HISTORY)
 
 
 # --------------------------------------------------------------------------- #
@@ -329,37 +388,49 @@ def main():
     ap.add_argument("--mode", choices=["okf", "rag", "hybrid"], help="override RETRIEVAL_MODE")
     ap.add_argument("--target", choices=["solution", "agent"], default="agent")
     ap.add_argument("--eval-file", default=os.path.join(HERE, "policy_eval.json"))
-    ap.add_argument("--judge", choices=["on", "off"], default="off")
     ap.add_argument("--subset", choices=["smoke", "full"], default="full")
-    ap.add_argument("--judge-model", default=os.getenv("EVAL_JUDGE_MODEL", "gemini-3.5-flash"))
+    ap.add_argument("--judge-model", default=os.getenv("EVAL_JUDGE_MODEL", "gemini-3.6-flash"),
+                    help="grader model; default is stronger than the agent so it doesn't share its blind spots")
     ap.add_argument("--self-consistency", type=int, default=1, help="judge N times, take median")
     ap.add_argument("--compare-modes", action="store_true", help="run okf and rag side by side")
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="verbose progress logging to stderr (DEBUG level)")
     args = ap.parse_args()
+
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
 
     data = json.load(open(args.eval_file))
     rubric = data.get("rubric", {})
+    if not rubric.get("judge_instructions"):
+        log.warning("rubric has no 'judge_instructions' — using the thin built-in "
+                    "fallback; add it to %s for full judge guidance", args.eval_file)
     cases = data["cases"]
     if args.subset == "smoke":
         cases = [c for c in cases if c.get("smoke")] or cases
-    use_judge = args.judge == "on"
 
     modes = ["okf", "rag"] if args.compare_modes else [args.mode or os.getenv("RETRIEVAL_MODE", "okf")]
+    log.info("eval file=%s | cases=%d | subset=%s | target=%s | judge=%s | modes=%s",
+             args.eval_file, len(cases), args.subset, args.target, args.judge_model, modes)
     summaries = {}
     for mode in modes:
+        log.info("starting retrieval mode=%s", mode)
         os.environ["RETRIEVAL_MODE"] = mode
         # reload config + agent so the mode change takes effect
         for m in ("agent.config", "agent.agent"):
             sys.modules.pop(m, None)
+        log.info("reloading agent/config for mode=%s (target=%s)", mode, args.target)
         runner = load_agent(args.target)
-        print(f"\n===== mode={mode} | target={args.target} | judge={args.judge} | subset={args.subset} =====")
-        results = run_suite(cases, rubric, runner, use_judge, args.judge_model, args.self_consistency)
-        summary = print_report(results, use_judge, mode, args.target, rubric)
+        print(f"\n===== mode={mode} | target={args.target} | judge={args.judge_model} | subset={args.subset} =====")
+        results = run_suite(cases, rubric, runner, args.judge_model, args.self_consistency)
+        summary = print_report(results, mode, args.target, rubric)
         if summary:
             summaries[mode] = summary
+            log.info("mode=%s TOTAL %.1f / 100", mode, summary["total"])
 
-    if use_judge and not args.compare_modes and summaries:
+    if not args.compare_modes and summaries:
         show_delta_and_save(summaries[modes[0]], modes[0], args.target)
-    if use_judge and args.compare_modes and len(summaries) == 2:
+    if args.compare_modes and len(summaries) == 2:
         print("\n===== okf vs rag =====")
         for cid in summaries["okf"]["per_case"]:
             o = summaries["okf"]["per_case"].get(cid, 0) * 100
