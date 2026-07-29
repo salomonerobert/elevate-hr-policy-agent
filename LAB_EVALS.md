@@ -15,6 +15,10 @@ by fixing the real weakness, not by memorizing the test.
 number (`evals/RUBRICS.md`). *Hillclimbing* is the loop: measure → find the weakest
 spot → change one thing → measure again → keep it if the number went up.
 
+> 🆕 **New here?** Read `evals/EVAL_WALKTHROUGH.md` first — a plain-language tour of
+> what `run_eval.py` actually does end-to-end (anatomy of a case, how the judge scores,
+> how to read the scoreboard). Come back here for the exercises.
+
 > ⚠️ The whole point is to build a genuinely better agent — **not** to hardcode the 7
 > answers. At the end, the trainer reveals a *hidden* test to check you didn't cheat.
 >
