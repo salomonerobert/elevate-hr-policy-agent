@@ -32,7 +32,15 @@ import os
 import re
 import statistics
 import sys
+import warnings
 from datetime import datetime, timezone
+
+# ADK emits an [EXPERIMENTAL] UserWarning ("FeatureName.JSON_SCHEMA_FOR_FUNC_DECL
+# is enabled") whenever it builds tool function-declarations. It's an internal
+# library feature flag, not something our code enables — silence it so it doesn't
+# clutter the per-case logs. (The old "migrate to the async method" deprecations
+# are gone at the source: agent.py now drives the async ADK APIs.)
+warnings.filterwarnings("ignore", message=r".*JSON_SCHEMA_FOR_FUNC_DECL.*")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)

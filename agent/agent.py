@@ -76,20 +76,38 @@ def _ensure_runner():
     return Runner(app_name=config.APP_NAME, agent=root_agent, session_service=_session_service)
 
 
-def _ensure_session(user_id, session_id):
-    """Create the session, tolerating both sync and async ADK builds."""
+async def _ensure_session_async(user_id, session_id):
+    """Create the session via the async API (the *_sync helpers are deprecated)."""
     try:
-        _session_service.create_session_sync(
+        await _session_service.create_session(
             app_name=config.APP_NAME, user_id=user_id, session_id=session_id
-        )
-    except AttributeError:
-        asyncio.run(
-            _session_service.create_session(
-                app_name=config.APP_NAME, user_id=user_id, session_id=session_id
-            )
         )
     except Exception:
         pass  # already exists
+
+
+async def _run_query_traced_async(query, user_id, session_id):
+    from google.genai import types
+
+    runner = _ensure_runner()
+    await _ensure_session_async(user_id, session_id)
+    message = types.Content(role="user", parts=[types.Part(text=query)])
+    final = ""
+    evidence = []
+    async for event in runner.run_async(
+        user_id=user_id, session_id=session_id, new_message=message
+    ):
+        if not (event.content and event.content.parts):
+            continue
+        for part in event.content.parts:
+            fr = getattr(part, "function_response", None)
+            if fr is not None:
+                evidence.append({"tool": getattr(fr, "name", "?"), "payload": fr.response})
+        if event.is_final_response() and event.content.parts:
+            texts = [p.text for p in event.content.parts if getattr(p, "text", None)]
+            if texts:
+                final = "\n".join(texts)
+    return final, evidence
 
 
 def run_query(query: str, user_id: str = "learner", session_id: str = "session-1") -> str:
@@ -104,26 +122,12 @@ def run_query_traced(query: str, user_id: str = "learner", session_id: str = "se
     {"tool": <tool name>, "payload": <the tool's return value>} — i.e. exactly
     what each retrieval tool handed back to the model. The eval harness uses this
     to check *grounding* (did the answer stick to what was retrieved?).
-    """
-    from google.genai import types
 
-    runner = _ensure_runner()
-    _ensure_session(user_id, session_id)
-    message = types.Content(role="user", parts=[types.Part(text=query)])
-    final = ""
-    evidence = []
-    for event in runner.run(user_id=user_id, session_id=session_id, new_message=message):
-        if not (event.content and event.content.parts):
-            continue
-        for part in event.content.parts:
-            fr = getattr(part, "function_response", None)
-            if fr is not None:
-                evidence.append({"tool": getattr(fr, "name", "?"), "payload": fr.response})
-        if event.is_final_response() and event.content.parts:
-            texts = [p.text for p in event.content.parts if getattr(p, "text", None)]
-            if texts:
-                final = "\n".join(texts)
-    return final, evidence
+    Drives the async ADK APIs (run_async + async create_session) under
+    asyncio.run, so callers stay synchronous without hitting the deprecated
+    sync Runner.run / *_sync session methods.
+    """
+    return asyncio.run(_run_query_traced_async(query, user_id, session_id))
 
 
 def _interactive():
