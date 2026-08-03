@@ -77,8 +77,8 @@ def provision(project_id: str, region: str, location: str, data_store_id: str, e
     
     data_store = discoveryengine_v1.DataStore(
         display_name="HR Policy Lab Data Store",
-        industry_vertical=discoveryengine_v1.DataStore.IndustryVertical.GENERIC,
-        solution_types=[discoveryengine_v1.DataStore.SolutionType.SOLUTION_TYPE_SEARCH],
+        industry_vertical=discoveryengine_v1.IndustryVertical.GENERIC,
+        solution_types=[discoveryengine_v1.SolutionType.SOLUTION_TYPE_SEARCH],
         content_config=discoveryengine_v1.DataStore.ContentConfig.CONTENT_REQUIRED,
     )
     try:
@@ -119,29 +119,46 @@ def provision(project_id: str, region: str, location: str, data_store_id: str, e
     print(f"Next step -> Ingest documents: uv run python rag/ingest-docs.py --project {project_id}")
 
 
+def _initiate_delete(label: str, delete_fn, name: str):
+    """Kick off a Discovery Engine delete and report the outcome accurately.
+
+    Two quirks make the naive `op.result()` approach misleading:
+      1. delete_* operations return google.protobuf.Empty, so `op.result()` can
+         raise "Long-running operation had neither response nor error set." even
+         though the delete was accepted — which would get logged as "skipped".
+      2. Deletion is asynchronous on the backend and can take up to a couple of
+         hours, so blocking on the result is impractical anyway.
+    So we issue the delete (which still raises synchronously on real errors like
+    permission/NotFound) and report that deletion has been *initiated*.
+    """
+    try:
+        print(f"Deleting {label} ...")
+        delete_fn(name=name)
+    except NotFound:
+        print(f"  ✓ {label} already gone.")
+    except Exception as e:  # noqa: BLE001
+        print(f"  (⚠ {label} delete failed: {e})")
+    else:
+        print(f"  ✓ {label} deletion initiated (async — can take up to a couple of hours to finish).")
+
+
 def destroy(project_id: str, region: str, location: str, data_store_id: str, engine_id: str):
     print(f"Cleaning up Vertex AI Search & GCS resources for project {project_id} ...")
     parent = f"projects/{project_id}/locations/{location}/collections/default_collection"
 
     engine_client = discoveryengine_v1.EngineServiceClient()
-    engine_name = f"{parent}/engines/{engine_id}"
-    try:
-        print(f"Deleting Search Engine: {engine_id} ...")
-        op = engine_client.delete_engine(name=engine_name)
-        op.result()
-        print("  ✓ Search engine deleted.")
-    except Exception as e:
-        print(f"  (Search engine delete skipped: {e})")
+    _initiate_delete(
+        f"Search Engine {engine_id}",
+        engine_client.delete_engine,
+        f"{parent}/engines/{engine_id}",
+    )
 
     ds_client = discoveryengine_v1.DataStoreServiceClient()
-    ds_name = f"{parent}/dataStores/{data_store_id}"
-    try:
-        print(f"Deleting Data Store: {data_store_id} ...")
-        op = ds_client.delete_data_store(name=ds_name)
-        op.result()
-        print("  ✓ Data store deleted.")
-    except Exception as e:
-        print(f"  (Data store delete skipped: {e})")
+    _initiate_delete(
+        f"Data Store {data_store_id}",
+        ds_client.delete_data_store,
+        f"{parent}/dataStores/{data_store_id}",
+    )
 
     bucket_name = f"{project_id}-hr-policies-source"
     storage_client = storage.Client(project=project_id)
@@ -153,7 +170,11 @@ def destroy(project_id: str, region: str, location: str, data_store_id: str, eng
     except Exception as e:
         print(f"  (Bucket delete skipped: {e})")
 
-    print("\n[DONE] Cleanup complete.")
+    print("\n[DONE] Cleanup initiated. The bucket is gone immediately, but the")
+    print("engine/data store finish deleting in the background (up to a couple of")
+    print("hours). Recreating with the SAME data-store/engine id before that")
+    print("finishes fails with FAILED_PRECONDITION — use a fresh id if you need")
+    print("to re-provision right away.")
 
 
 def main():
