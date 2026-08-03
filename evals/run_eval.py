@@ -32,6 +32,7 @@ import os
 import re
 import statistics
 import sys
+import time
 import warnings
 from datetime import datetime, timezone
 
@@ -78,14 +79,40 @@ def load_agent(target: str):
 # --------------------------------------------------------------------------- #
 # The LLM judge (rubric scoring)
 # --------------------------------------------------------------------------- #
+def _summarize_index_payload(tool, payload):
+    """If a payload is the concept *catalog* (list_concepts), return a short
+    summary instead of its full text; otherwise return None.
+
+    list_concepts is a table of contents — an answer should never be *grounded*
+    in it, and inlining all ~150 concept titles+descriptions (tens of thousands
+    of chars) would crowd the actually-retrieved policy sections out of the
+    judge's context window (that budget is what `limit` guards). So we collapse
+    it to a one-liner and let the real read_concept/RAG evidence use the window.
+    """
+    if not isinstance(payload, dict):
+        return None
+    concepts = payload.get("concepts")
+    if tool == "list_concepts" or isinstance(concepts, list):
+        n = len(concepts) if isinstance(concepts, list) else "?"
+        return (f"catalog index only — {n} concept titles browsed. This is a "
+                f"table of contents, NOT policy text: an answer must be grounded "
+                f"in read_concept / RAG content, never in this list.")
+    return None
+
+
 def evidence_to_str(evidence: list, limit: int = 8000) -> str:
     """Flatten the retrieved-tool payloads into text for the judge."""
     if not evidence:
         return "(the agent retrieved nothing)"
     parts = []
     for e in evidence:
+        tool = e.get("tool")
         payload = e.get("payload")
-        parts.append(f"[tool: {e.get('tool')}] {json.dumps(payload, default=str)[:limit]}")
+        summary = _summarize_index_payload(tool, payload)
+        if summary is not None:
+            parts.append(f"[tool: {tool}] {summary}")
+        else:
+            parts.append(f"[tool: {tool}] {json.dumps(payload, default=str)[:limit]}")
     return "\n\n".join(parts)[: limit * 2]
 
 
@@ -213,23 +240,47 @@ def _coerce_score(entry):
     return max(0, min(2, score)), why
 
 
+# Substrings that mark a *transient* judge failure worth retrying. A permanent
+# error (bad request, auth, model-not-found) is NOT here, so it re-raises fast and
+# the case is scored 0 via the ⚠ ERRORED path rather than being retried pointlessly.
+_TRANSIENT_JUDGE_ERRORS = (
+    "429", "resource_exhausted", "rate limit", "quota",
+    "503", "unavailable", "500", "internal", "deadline", "timeout",
+)
+
+
+def _judge_generate(client, model, prompt, attempts=4, base_delay=2.0):
+    """Call the judge model once, retrying transient errors with exponential
+    backoff. Without this, a single Vertex 429/503 on one case permanently
+    dropped it to 0 — noise that a run-over-run comparison should not carry."""
+    from google.genai import types
+
+    config = types.GenerateContentConfig(temperature=0, response_mime_type="application/json")
+    delay = base_delay
+    for attempt in range(1, attempts + 1):
+        try:
+            return client.models.generate_content(model=model, contents=prompt, config=config)
+        except Exception as e:  # noqa: BLE001
+            msg = str(e).lower()
+            transient = any(t in msg for t in _TRANSIENT_JUDGE_ERRORS)
+            if not transient or attempt == attempts:
+                raise
+            log.warning("judge call transient error (attempt %d/%d): %s — retrying in %.0fs",
+                        attempt, attempts, e, delay)
+            time.sleep(delay)
+            delay *= 2
+
+
 def judge_case(case, rubric, answer, evidence_str, model, n=1):
     """Call the LLM judge n times; return {dim: median_score} + justifications."""
     from google import genai
-    from google.genai import types
 
     client = genai.Client()
     prompt = build_judge_prompt(case, rubric, answer, evidence_str)
     runs = []
     justifications = {}
     for _ in range(n):
-        resp = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0, response_mime_type="application/json"
-            ),
-        )
+        resp = _judge_generate(client, model, prompt)
         parsed = _parse_json(resp.text)
         scores = {}
         for d in case["dimensions"]:

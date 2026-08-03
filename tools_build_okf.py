@@ -13,6 +13,7 @@ Usage:
     python tools_build_okf.py --write    # (re)generate knowledge/ concept files
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -130,6 +131,55 @@ def parse():
     return sections, concepts
 
 
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def make_description(body: str, max_len: int = 240, max_labels: int = 8) -> str:
+    """Build a one-line index `description` that surfaces a concept's *governing*
+    topics, for list_concepts() to expose to the agent.
+
+    The naive 'first line' is a poor index key: a subsection's opening sentence
+    usually just names the topic, while the rules that actually decide a question
+    live in the labelled bullets below it (e.g. §2.2's SPL reduction is the third
+    bullet — invisible from the first line). So we combine the opening sentence
+    with the topic LABELS of the '- Label: ...' bullets. Deterministic and
+    corpus-only: we surface the handbook's own bullet labels, we don't paraphrase
+    the rule text. Labels are prioritised over the intro when space is tight,
+    because they are what makes a governing rule findable.
+    """
+    intro = ""
+    first_text = ""  # fallback: first sentence of the first content line, bullet or not
+    labels = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        is_bullet = line[:1] in "-*"
+        content = line[1:].strip() if is_bullet else line
+        if not first_text:
+            first_text = _SENT_SPLIT.split(content, 1)[0].strip()
+        if is_bullet:
+            head = content.split(":", 1)[0].strip() if ":" in content else ""
+            # a topic label is a short noun phrase, not a whole sentence
+            if head and len(head) <= 60 and len(head.split()) <= 8 and head not in labels:
+                labels.append(head)
+        elif not intro:
+            intro = _SENT_SPLIT.split(content, 1)[0].strip()
+
+    # some subsections are just unlabelled bullets (no intro, no "Label:" heads) —
+    # fall back to their opening sentence so every concept gets a real description.
+    if not intro and not labels:
+        intro = first_text
+    labels = labels[:max_labels]
+    labels_str = ("Covers: " + "; ".join(labels) + ".") if labels else ""
+    # reserve room for the labels (the valuable part); trim the intro to fit
+    intro_budget = max(0, max_len - len(labels_str) - 1)
+    if len(intro) > intro_budget:
+        intro = intro[:intro_budget].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+    desc = re.sub(r"\s+", " ", (intro + " " + labels_str)).strip()
+    return desc[:max_len].strip()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
@@ -189,6 +239,7 @@ def main():
             body = normalize_body(c["body"])
             fm = ["---", "type: HR Policy",
                   f'title: "{c["title"]}"',
+                  f"description: {json.dumps(make_description(body))}",
                   f'source: "Altostrat Singapore Employee Policy Handbook & Conduct Guidelines, Section {c["sec"]}.{c["sub"]}"',
                   "---", "", f"# {c['title']}", "", body, ""]
             with open(os.path.join(KN, d, fn), "w") as fh:
