@@ -41,6 +41,29 @@ You'll see a scoreboard and a **TOTAL / 100**. Write it down — this is your ba
 > Iterating fast? Use `--subset smoke` (3 representative cases) for the inner loop
 > (fewer judge calls), and do a full run before you trust a number.
 
+### Find your noise floor first
+
+The judge is an LLM, so the *same agent answer* can score a point or two differently
+run to run. Before you trust any delta, measure how big that wobble is. Run the
+baseline **2–3 times without changing anything**:
+
+```bash
+uv run python evals/run_eval.py --mode okf --target agent   # run it 3×, note each TOTAL
+```
+
+The spread you see (say ±3 points) is your **noise floor** — the smallest change that
+means nothing. A later "improvement" of +2 is inside the noise; it isn't real. Two
+knobs shrink the floor so real deltas are easier to see:
+
+- `--self-consistency N` — judges each answer **N times and takes the median**, damping
+  *judge* variance. Note what it does **not** do: the agent still answers once per case,
+  so this stabilizes grading, not the agent's own run-to-run variation. `N=3` is a good
+  default when a delta is close to the floor.
+- `--subset smoke` keeps runs cheap while you re-measure; lock the final number on a full run.
+
+Write your noise floor next to your baseline — you'll use it as the keep/revert
+threshold in Exercise 3.
+
 ---
 
 ## Exercise 1 — Read the scoreboard (eval literacy)
@@ -89,8 +112,11 @@ the score moves, you won't know why.
 3. **Hypothesize** one cause + fix (Ex 2).
 4. **Change ONE lever** (table below).
 5. **Re-measure** the same command. Note the delta and *which cases flipped*.
-6. **Keep or revert.** Net up with no regressions → keep. Fixed one, broke another →
-   **revert** and find the real root cause. Log every run (even reverts).
+6. **Keep or revert.** First ask: **is the delta bigger than your noise floor**
+   (Ex 0)? If not, it's noise — treat it as no change, not a win. A real net gain with
+   no regressions → keep. Fixed one, broke another → **revert** and find the real root
+   cause. When a delta is close to the floor, re-measure with `--self-consistency 3`
+   before deciding. Log every run (even reverts).
 
 ### Which lever fixes which failure
 
