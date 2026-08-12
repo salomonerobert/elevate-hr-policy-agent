@@ -8,29 +8,46 @@ You will drive your AI pair programmer (`agy`) to specify, plan, and build a mod
 
 ## 🚀 Quick Start & Setup
 
+> [!TIP]
+> **Recommended Environment:** We recommend using **GCP Cloud Shell** or the **Cloud Shell Editor / built-in IDE** for the best setup and development experience.
+>
+> **Execution Mode:** When launching `agy`, run `agy --dangerously-skip-permissions` to allow `agy` to build and execute workspace commands without repeatedly asking for permissions.
+
 ### Step 1: Clone the Repository
 
-If you haven't already, clone the repository to your local machine:
+If you haven't already, clone the repository in GCP Cloud Shell:
 
 ```bash
 git clone https://github.com/salomonerobert/elevate-hr-policy-agent.git
 cd elevate-hr-policy-agent
 ```
 
-### Step 2: Install Dependencies & Conductor Extension
+### Step 2: Install Dependencies & Environment Setup
 
 1. **Set up the Python environment:**
    ```bash
    uv sync
    ```
 
-2. **Install the Conductor extension into `agy`:**
+2. **Configure Environment Variables (`.env`):**
+   Copy `.env.example` to `.env` and configure Vertex AI with your GCP Project ID:
+   ```bash
+   cp .env.example .env
+   ```
+   Open `.env` and update it to enable Vertex AI and set your GCP Project ID (commenting out `GEMINI_API_KEY` if present):
+   ```env
+   GOOGLE_GENAI_USE_VERTEXAI=true
+   GOOGLE_CLOUD_PROJECT=your_gcp_project_id
+   GOOGLE_CLOUD_LOCATION=global
+   ```
+
+3. **Install the Conductor extension into `agy`:**
    ```bash
    agy plugins install https://github.com/gemini-cli-extensions/conductor
    ```
 
-3. **Verify Conductor Installation:**
-   Run `agy` and check that `/conductor` commands are available (e.g., `/conductor:conductor-status`, `/conductor:conductor-new-track`).
+4. **Verify Conductor Installation:**
+   Launch `agy` with `agy --dangerously-skip-permissions` and check that `/conductor` commands are available (e.g., `/conductor:conductor-status`, `/conductor:conductor-new-track`).
 
 ---
 
@@ -40,7 +57,13 @@ In this phase, you will use Conductor to plan and implement a full-stack interac
 
 ### Step 3.1: Initialize the New Track
 
-Launch `agy` in your terminal and execute the `/conductor:conductor-new-track` slash command (or paste the command directly):
+Launch `agy` in your terminal using the `--dangerously-skip-permissions` flag:
+
+```bash
+agy --dangerously-skip-permissions
+```
+
+Execute the `/conductor:conductor-new-track` slash command (or paste the command directly):
 
 ```text
 /conductor:conductor-new-track
@@ -109,7 +132,7 @@ After Conductor completes implementation:
 
 1. **Start the Web Server:**
    ```bash
-   uv run uvicorn server:app --reload --port 8000
+   PYTHONPATH=. uv run uvicorn web.server:app --reload --port 8000
    ```
    *(Or the command specified in your generated track README).*
 
