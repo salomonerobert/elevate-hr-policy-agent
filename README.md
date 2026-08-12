@@ -146,6 +146,35 @@ After Conductor completes implementation:
 
 ---
 
+## 🎁 Bonus Challenge: Test Sanity Check & Expanding Coverage
+
+After Conductor finishes implementing your track, take time to review and enhance the test suite created during development.
+
+### Step 1: Sanity Check Conductor-Generated Tests
+Inspect the test files created by Conductor (e.g., in `tests/` or `web/tests/`) and verify whether:
+- The tests validate meaningful application behavior rather than relying on over-simplified mocks.
+- Core functionality—such as SSE streaming endpoints, static file delivery, and agent integration—is adequately tested.
+- Edge cases (e.g., empty queries, network delays, unknown policy concept lookups, or tool failures) are covered.
+
+Run the generated test suite in your terminal:
+```bash
+PYTHONPATH=. uv run pytest
+```
+
+### Step 2: Prompt `agy` for Targeted & Comprehensive Testing
+Prompt `agy` to audit test coverage, identify missing scenarios, and author new tests for uncovered areas.
+
+In `agy`, paste the following prompt:
+
+```text
+Please review the tests that Conductor generated during track implementation:
+1. Conduct a sanity check on existing test files to confirm assertions are meaningful and reflect actual application behavior.
+2. Identify any missing test coverage or unhandled edge cases (e.g., SSE connection drops, malformed requests, tool execution failures, or missing policy concepts).
+3. Write and execute additional pytest test cases to cover these specific areas and confirm that all tests pass cleanly.
+```
+
+---
+
 ## 📁 Repository Structure
 
 ```text
